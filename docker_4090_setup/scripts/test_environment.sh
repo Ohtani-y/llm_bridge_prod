@@ -12,28 +12,18 @@ docker-compose up -d
 sleep 30
 
 echo "🎮 GPU認識テスト..."
-echo "マスターノード:"
-docker-compose exec llm-master bash -c "conda activate llm_env && python -c '
+docker-compose exec llm-trainer bash -c "conda activate llm_env && python -c '
 import torch
 print(f\"PyTorch: {torch.__version__}\")
 print(f\"CUDA available: {torch.cuda.is_available()}\")
 print(f\"GPU count: {torch.cuda.device_count()}\")
 for i in range(torch.cuda.device_count()):
     print(f\"GPU {i}: {torch.cuda.get_device_name(i)}\")
-'"
-
-echo "ワーカーノード:"
-docker-compose exec llm-worker bash -c "conda activate llm_env && python -c '
-import torch
-print(f\"PyTorch: {torch.__version__}\")
-print(f\"CUDA available: {torch.cuda.is_available()}\")
-print(f\"GPU count: {torch.cuda.device_count()}\")
-for i in range(torch.cuda.device_count()):
-    print(f\"GPU {i}: {torch.cuda.get_device_name(i)}\")
+    print(f\"GPU {i} Memory: {torch.cuda.get_device_properties(i).total_memory / 1024**3:.1f}GB\")
 '"
 
 echo "📚 ライブラリインポートテスト..."
-docker-compose exec llm-master bash -c "conda activate llm_env && python -c '
+docker-compose exec llm-trainer bash -c "conda activate llm_env && python -c '
 import importlib
 
 modules = [
@@ -60,7 +50,7 @@ for mod in modules:
 '"
 
 echo "🔗 NCCL通信テスト..."
-docker-compose exec llm-master bash -c "conda activate llm_env && python -c '
+docker-compose exec llm-trainer bash -c "conda activate llm_env && python -c '
 import torch
 import torch.distributed as dist
 import os
@@ -75,7 +65,7 @@ else:
 '"
 
 echo "🎯 小規模学習テスト..."
-docker-compose exec llm-master bash -c "conda activate llm_env && python -c '
+docker-compose exec llm-trainer bash -c "conda activate llm_env && python -c '
 import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModelForCausalLM

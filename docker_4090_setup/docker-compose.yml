@@ -1,23 +1,25 @@
 version: '3.8'
 
 services:
-  # マスターノード (GPU 0-1)
-  llm-master:
+  # 単一ノード4GPU構成 (RTX 4090 x4)
+  llm-trainer:
     build: .
-    container_name: llm-master
-    hostname: llm-master
+    container_name: llm-trainer
+    hostname: llm-trainer
     privileged: true
-    shm_size: 16gb
+    shm_size: 32gb
     environment:
-      - NVIDIA_VISIBLE_DEVICES=0,1
-      - CUDA_VISIBLE_DEVICES=0,1
-      - MASTER_ADDR=llm-master
-      - MASTER_PORT=37171
+      - NVIDIA_VISIBLE_DEVICES=0,1,2,3
+      - CUDA_VISIBLE_DEVICES=0,1,2,3
+      - MASTER_ADDR=localhost
+      - MASTER_PORT=29500
       - NODE_RANK=0
-      - NNODES=2
-      - GPUS_PER_NODE=2
-      - NCCL_SOCKET_IFNAME=eth0
+      - NNODES=1
+      - GPUS_PER_NODE=4
+      - NCCL_SOCKET_IFNAME=lo
       - NCCL_DEBUG=INFO
+      - NCCL_P2P_DISABLE=0
+      - NCCL_IB_DISABLE=1
       - WANDB_ENTITY=${WANDB_ENTITY:-YOUR_TEAM_ENTITY_NAME}
       - WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-competition_verl_test}
       - WANDB_RUN_NAME=${WANDB_RUN_NAME:-llama3.2_4090_training}
@@ -29,85 +31,23 @@ services:
       - ./models:/workspace/models
       - ./checkpoints:/workspace/checkpoints
       - ./logs:/workspace/logs
-      - ssh_keys:/root/.ssh
     ports:
       - "2222:22"
       - "8265:8265"  # Ray Dashboard
-      - "37171:37171"  # Master Port
-      - "37172:37172"  # Ray Head Port
-      - "37173:37173"  # Ray Port
-    networks:
-      - llm_network
+      - "29500:29500"  # PyTorch Distributed Port
+      - "6006:6006"   # TensorBoard
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
-              device_ids: ['0', '1']
+              device_ids: ['0', '1', '2', '3']
               capabilities: [gpu]
     command: >
       bash -c "
-        echo 'マスターノード起動中...' &&
+        echo '単一ノード4GPU学習環境起動中...' &&
+        echo 'GPU情報確認:' &&
+        nvidia-smi &&
         cd /workspace/llm_bridge_prod &&
         /bin/bash
       "
-
-  # ワーカーノード (GPU 2-3)
-  llm-worker:
-    build: .
-    container_name: llm-worker
-    hostname: llm-worker
-    privileged: true
-    shm_size: 16gb
-    environment:
-      - NVIDIA_VISIBLE_DEVICES=2,3
-      - CUDA_VISIBLE_DEVICES=0,1  # コンテナ内では0,1として認識
-      - MASTER_ADDR=llm-master
-      - MASTER_PORT=37171
-      - NODE_RANK=1
-      - NNODES=2
-      - GPUS_PER_NODE=2
-      - NCCL_SOCKET_IFNAME=eth0
-      - NCCL_DEBUG=INFO
-      - WANDB_ENTITY=${WANDB_ENTITY:-YOUR_TEAM_ENTITY_NAME}
-      - WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME:-competition_verl_test}
-      - WANDB_RUN_NAME=${WANDB_RUN_NAME:-llama3.2_4090_training}
-      - WANDB_API_KEY=${WANDB_API_KEY}
-      - HUGGINGFACE_API_KEY=${HUGGINGFACE_API_KEY}
-    volumes:
-      - ../:/workspace/llm_bridge_prod
-      - ./data:/workspace/data
-      - ./models:/workspace/models
-      - ./checkpoints:/workspace/checkpoints
-      - ./logs:/workspace/logs
-      - ssh_keys:/root/.ssh
-    ports:
-      - "2223:22"
-    networks:
-      - llm_network
-    depends_on:
-      - llm-master
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              device_ids: ['2', '3']
-              capabilities: [gpu]
-    command: >
-      bash -c "
-        echo 'ワーカーノード起動中...' &&
-        sleep 10 &&
-        cd /workspace/llm_bridge_prod &&
-        /bin/bash
-      "
-
-volumes:
-  ssh_keys:
-
-networks:
-  llm_network:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.20.0.0/16

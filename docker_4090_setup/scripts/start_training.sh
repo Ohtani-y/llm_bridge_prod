@@ -20,11 +20,11 @@ docker-compose up -d
 echo "⏳ コンテナの起動を待機中..."
 sleep 30
 
-echo "🔍 マスターノードの準備確認中..."
-docker-compose exec llm-master bash -c "conda activate llm_env && python -c 'import torch; print(f\"PyTorch: {torch.__version__}\"); print(f\"CUDA available: {torch.cuda.is_available()}\"); print(f\"GPU count: {torch.cuda.device_count()}\")'"
+echo "🔍 単一ノード4GPU環境の準備確認中..."
+docker-compose exec llm-trainer bash -c "conda activate llm_env && python -c 'import torch; print(f\"PyTorch: {torch.__version__}\"); print(f\"CUDA available: {torch.cuda.is_available()}\"); print(f\"GPU count: {torch.cuda.device_count()}\"); [print(f\"GPU {i}: {torch.cuda.get_device_name(i)}\") for i in range(torch.cuda.device_count())]'"
 
 echo "📥 データセットダウンロード中..."
-docker-compose exec llm-master bash -c "
+docker-compose exec llm-trainer bash -c "
     conda activate llm_env &&
     cd /workspace &&
     mkdir -p data/gsm8k &&
@@ -49,7 +49,7 @@ print(f'テストデータ: {len(test_df)}件')
 "
 
 echo "📥 ベースモデルダウンロード中..."
-docker-compose exec llm-master bash -c "
+docker-compose exec llm-trainer bash -c "
     conda activate llm_env &&
     cd /workspace &&
     mkdir -p models &&
@@ -72,30 +72,31 @@ print(f'モデル保存完了: {save_path}')
 \"
 "
 
-echo "🎯 SFT学習開始..."
-docker-compose exec llm-master bash -c "
+echo "🎯 単一ノード4GPU SFT学習開始..."
+docker-compose exec llm-trainer bash -c "
     conda activate llm_env &&
     cd /workspace/llm_bridge_prod &&
-    export MASTER_ADDR=llm-master &&
-    export MASTER_PORT=37171 &&
+    export MASTER_ADDR=localhost &&
+    export MASTER_PORT=29500 &&
     export NODE_RANK=0 &&
-    export NNODES=2 &&
-    export GPUS_PER_NODE=2 &&
-    export NCCL_SOCKET_IFNAME=eth0 &&
+    export NNODES=1 &&
+    export GPUS_PER_NODE=4 &&
+    export NCCL_SOCKET_IFNAME=lo &&
+    export NCCL_P2P_DISABLE=0 &&
+    export NCCL_IB_DISABLE=1 &&
     export WANDB_ENTITY=${WANDB_ENTITY} &&
     export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME} &&
     export WANDB_RUN_NAME=${WANDB_RUN_NAME}_sft &&
     
-    torchrun --rdzv_backend c10d \
-             --rdzv_endpoint \${MASTER_ADDR}:\${MASTER_PORT} \
-             --nnodes \${NNODES} --nproc_per_node \${GPUS_PER_NODE} \
-             --node_rank \${NODE_RANK} \
+    torchrun --standalone \
+             --nnodes=1 \
+             --nproc_per_node=4 \
              -m verl.trainer.fsdp_sft_trainer \
              data.train_files=/workspace/data/gsm8k/train.parquet \
              data.val_files=/workspace/data/gsm8k/test.parquet \
              data.prompt_key=question \
              data.response_key=answer \
-             data.micro_batch_size_per_gpu=4 \
+             data.micro_batch_size_per_gpu=3 \
              model.partial_pretrain=/workspace/models/Llama-3.2-1B-Instruct \
              trainer.project_name=gsm8k-sft-4090 \
              trainer.experiment_name=/workspace/checkpoints/sft_llama_4090 \
@@ -103,41 +104,7 @@ docker-compose exec llm-master bash -c "
              trainer.save_freq=500 \
              trainer.eval_freq=100 \
              trainer.log_freq=10
-" &
-
-echo "🔗 ワーカーノード学習参加..."
-sleep 10
-docker-compose exec llm-worker bash -c "
-    conda activate llm_env &&
-    cd /workspace/llm_bridge_prod &&
-    export MASTER_ADDR=llm-master &&
-    export MASTER_PORT=37171 &&
-    export NODE_RANK=1 &&
-    export NNODES=2 &&
-    export GPUS_PER_NODE=2 &&
-    export NCCL_SOCKET_IFNAME=eth0 &&
-    export WANDB_ENTITY=${WANDB_ENTITY} &&
-    export WANDB_PROJECT_NAME=${WANDB_PROJECT_NAME} &&
-    export WANDB_RUN_NAME=${WANDB_RUN_NAME}_sft &&
-    
-    torchrun --rdzv_backend c10d \
-             --rdzv_endpoint \${MASTER_ADDR}:\${MASTER_PORT} \
-             --nnodes \${NNODES} --nproc_per_node \${GPUS_PER_NODE} \
-             --node_rank \${NODE_RANK} \
-             -m verl.trainer.fsdp_sft_trainer \
-             data.train_files=/workspace/data/gsm8k/train.parquet \
-             data.val_files=/workspace/data/gsm8k/test.parquet \
-             data.prompt_key=question \
-             data.response_key=answer \
-             data.micro_batch_size_per_gpu=4 \
-             model.partial_pretrain=/workspace/models/Llama-3.2-1B-Instruct \
-             trainer.project_name=gsm8k-sft-4090 \
-             trainer.experiment_name=/workspace/checkpoints/sft_llama_4090 \
-             trainer.total_epochs=2 \
-             trainer.save_freq=500 \
-             trainer.eval_freq=100 \
-             trainer.log_freq=10
-" &
+"
 
 echo "🎉 学習開始完了！"
 echo ""

@@ -6,7 +6,7 @@
 
 - **RTX 4090 x4対応**: 4台のRTX 4090 GPUを効率的に活用
 - **自動学習パイプライン**: データダウンロードから学習まで完全自動化
-- **マルチノード分散学習**: Docker Composeによる2ノード構成
+- **単一ノード分散学習**: 1台のPC内4GPU並列学習
 - **メモリ最適化**: 24GB VRAM制限に対応した設定
 - **監視機能**: リアルタイム学習状況監視
 
@@ -70,7 +70,7 @@ nano .env
 ```
 docker_4090_setup/
 ├── Dockerfile              # RTX 4090最適化Dockerイメージ
-├── docker-compose.yml      # マルチノード構成定義
+├── docker-compose.yml      # 単一ノード4GPU構成定義
 ├── .env.example            # 環境変数テンプレート
 ├── README.md               # このファイル
 ├── scripts/
@@ -98,7 +98,7 @@ docker_4090_setup/
 - 適切なソケットインターフェース設定
 
 ### 並列化設定
-- 2ノード x 2GPU構成
+- 単一ノード x 4GPU構成
 - FSDP (Fully Sharded Data Parallel)
 - Flash Attention 2対応
 
@@ -137,11 +137,8 @@ https://wandb.ai/{WANDB_ENTITY}/{WANDB_PROJECT_NAME}
 # 全ログ
 docker-compose logs
 
-# マスターノードのみ
-docker-compose logs llm-master
-
-# ワーカーノードのみ
-docker-compose logs llm-worker
+# 学習ノードログ
+docker-compose logs llm-trainer
 ```
 
 ## 🛠️ トラブルシューティング
@@ -165,9 +162,9 @@ BATCH_SIZE=2  # デフォルト: 4
 ファイアウォール設定を確認:
 ```bash
 # 必要ポートの開放
-sudo ufw allow 37171
-sudo ufw allow 37172
-sudo ufw allow 37173
+sudo ufw allow 29500  # PyTorch Distributed
+sudo ufw allow 8265   # Ray Dashboard
+sudo ufw allow 6006   # TensorBoard
 ```
 
 ### コンテナ起動失敗
@@ -182,6 +179,32 @@ docker-compose logs
 docker-compose down
 docker-compose up -d --force-recreate
 ```
+
+## 🏗️ アーキテクチャ
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Docker Host (Ubuntu)                     │
+├─────────────────────────────────────────────────────────────┤
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │              llm-trainer                                │ │
+│  │           (単一ノード4GPU)                               │ │
+│  │                                                         │ │
+│  │  ┌───────────┐ ┌───────────┐ ┌───────────┐ ┌───────────┐ │ │
+│  │  │ RTX 4090  │ │ RTX 4090  │ │ RTX 4090  │ │ RTX 4090  │ │ │
+│  │  │  GPU:0    │ │  GPU:1    │ │  GPU:2    │ │  GPU:3    │ │ │
+│  │  └───────────┘ └───────────┘ └───────────┘ └───────────┘ │ │
+│  │                                                         │ │
+│  │              PyTorch DDP + NCCL通信                     │ │
+│  └─────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 単一ノード4GPU構成の特徴
+- **単一コンテナ**: 4つのGPU（0,1,2,3）を1つのコンテナで管理
+- **PyTorch DDP**: DistributedDataParallelによる効率的な並列学習
+- **NCCL通信**: GPU間での高速グラデーション同期
+- **メモリ最適化**: RTX 4090の24GB制限に対応した設定
 
 ## 📈 性能最適化
 
@@ -203,7 +226,7 @@ docker-compose up -d --force-recreate
 1. **環境初期化**: Docker環境構築
 2. **データ準備**: GSM8Kダウンロード・前処理
 3. **モデル準備**: Llama-3.2-1B-Instructダウンロード
-4. **分散学習**: 2ノード4GPU並列学習
+4. **分散学習**: 単一ノード4GPU並列学習
 5. **チェックポイント**: 定期的な学習状態保存
 6. **評価**: 検証データでの性能評価
 7. **モデル保存**: 最終モデルの保存
@@ -222,4 +245,22 @@ docker-compose up -d --force-recreate
 
 ---
 
-**注意**: この環境はRTX 4090 x4専用に最適化されています。他のGPU構成では設定の調整が必要な場合があります。
+**注意**: この環境は単一PC内のRTX 4090 x4専用に最適化されています。他のGPU構成や複数サーバー環境では設定の調整が必要な場合があります。
+
+## 🔧 単一ノード構成の詳細
+
+### GPU割り当て
+- **NVIDIA_VISIBLE_DEVICES**: `0,1,2,3` (全4GPU)
+- **CUDA_VISIBLE_DEVICES**: `0,1,2,3`
+- **torchrun設定**: `--standalone --nnodes=1 --nproc_per_node=4`
+
+### NCCL通信設定
+- **MASTER_ADDR**: `localhost` (単一ノード内通信)
+- **NCCL_SOCKET_IFNAME**: `lo` (ローカルループバック)
+- **NCCL_P2P_DISABLE**: `0` (GPU間P2P通信有効)
+- **NCCL_IB_DISABLE**: `1` (InfiniBand無効、PCIe使用)
+
+### メモリ最適化
+- **micro_batch_size_per_gpu**: `3` (RTX 4090 24GB対応)
+- **PYTORCH_CUDA_ALLOC_CONF**: `max_split_size_mb:512`
+- **Gradient Checkpointing**: 有効
