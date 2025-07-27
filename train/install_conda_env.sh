@@ -17,7 +17,69 @@ check_command() {
     fi
 }
 
+# ステップ前提条件チェック関数（CONDA_PREFIX活用版）
+check_step_prerequisites() {
+    local step_num=$1
+    local expected_env_path="$HOME/conda_env"
+    log "Checking prerequisites for step $step_num..."
+    
+    case $step_num in
+        "0_1")
+            # Step 0-1は前提条件なし
+            return 0
+            ;;
+        "0_2")
+            # Step 0-2の前提: Step 0-1完了（moduleロード済み、conda利用可能）
+            if ! command -v conda &> /dev/null; then
+                error_exit "Step 0-2 requires conda to be available (run step_0_1 first)"
+            fi
+            ;;
+        "0_3")
+            # Step 0-3の前提: conda環境が存在し、activate済み
+            if [ ! -d "$expected_env_path" ]; then
+                error_exit "Step 0-3 requires conda environment at $expected_env_path (run step_0_2 first)"
+            fi
+            
+            # conda環境がactivateされているかチェック
+            if [ -z "$CONDA_PREFIX" ] || [ "$CONDA_PREFIX" != "$expected_env_path" ]; then
+                log "Activating conda environment..."
+                source /home/appli/miniconda3/24.7.1-py311/etc/profile.d/conda.sh 2>/dev/null || true
+                conda activate "$expected_env_path" || error_exit "Failed to activate conda environment"
+            fi
+            ;;
+        "0_4"|"0_5"|"0_6"|"0_7"|"0_8"|"0_9"|"0_10")
+            # Step 0-4以降の前提: conda環境がactivate済み、基本パッケージインストール済み
+            if [ ! -d "$expected_env_path" ]; then
+                error_exit "Step $step_num requires conda environment at $expected_env_path (run previous steps first)"
+            fi
+            
+            # conda環境がactivateされているかチェック
+            if [ -z "$CONDA_PREFIX" ] || [ "$CONDA_PREFIX" != "$expected_env_path" ]; then
+                log "Activating conda environment..."
+                source /home/appli/miniconda3/24.7.1-py311/etc/profile.d/conda.sh 2>/dev/null || true
+                conda activate "$expected_env_path" || error_exit "Failed to activate conda environment"
+            fi
+            
+            # 基本的なツールの存在確認
+            if [ "$step_num" != "0_4" ] && [ "$step_num" != "0_5" ]; then
+                if ! command -v git &> /dev/null; then
+                    error_exit "Step $step_num requires git to be installed (run step_0_3 first)"
+                fi
+            fi
+            ;;
+        *)
+            error_exit "Unknown step number: $step_num"
+            ;;
+    esac
+    
+    # 最終的な環境確認
+    if [ "$step_num" != "0_1" ] && [ "$step_num" != "0_2" ]; then
+        log "Current conda environment: $CONDA_PREFIX"
+    fi
+}
+
 step_0_1_preparation() {
+    check_step_prerequisites "0_1"
     log "Step 0-1: Python仮想環境作成前における下準備"
     
     cd ~/
@@ -38,57 +100,66 @@ step_0_1_preparation() {
 }
 
 step_0_2_conda_env_creation() {
+    check_step_prerequisites "0_2"
     log "Step 0-2: conda環境生成"
     
-    export CONDA_PATH="~/conda_env"
-    echo "CONDA_PATH: $CONDA_PATH"
+    local env_path="$HOME/conda_env"
+    echo "Creating conda environment at: $env_path"
     
-    conda create --prefix $CONDA_PATH python=3.11 -y || error_exit "Failed to create conda environment"
+    conda create --prefix "$env_path" python=3.11 -y || error_exit "Failed to create conda environment"
     
-    LD_LIB_APPEND="/usr/lib64:/usr/lib:$CONDA_PATH/lib:$CONDA_PATH/lib/python3.11/site-packages/torch/lib:\$LD_LIBRARY_PATH"
-    echo "LD_LIB_APPEND: $LD_LIB_APPEND"
-    
-    mkdir -p $CONDA_PATH/etc/conda/activate.d
-    cat > $CONDA_PATH/etc/conda/activate.d/edit_environment_variable.sh << EOF
-export ORIGINAL_LD_LIBRARY_PATH=$LD_LIBRARY_PATH
-export ORIGINAL_CUDNN_PATH=$CUDNN_PATH
-export ORIGINAL_CUDA_HOME=$CUDA_HOME
-export ORIGINAL_CONDA_PATH=$CONDA_PATH
-export LD_LIBRARY_PATH=$LD_LIB_APPEND
-export CUDNN_PATH=$CONDA_PATH/lib
-export CUDA_HOME=$CONDA_PATH/
-export CONDA_PATH=$CONDA_PATH/
+    # activate.dスクリプトで環境変数を設定（CONDA_PREFIXを活用）
+    mkdir -p "$env_path/etc/conda/activate.d"
+    cat > "$env_path/etc/conda/activate.d/env_setup.sh" << 'EOF'
+#!/bin/bash
+# 元の環境変数をバックアップ
+export ORIGINAL_LD_LIBRARY_PATH="$LD_LIBRARY_PATH"
+export ORIGINAL_CUDNN_PATH="$CUDNN_PATH"
+export ORIGINAL_CUDA_HOME="$CUDA_HOME"
+
+# 新しい環境変数を設定（CONDA_PREFIXを活用）
+export LD_LIBRARY_PATH="/usr/lib64:/usr/lib:$CONDA_PREFIX/lib:$CONDA_PREFIX/lib/python3.11/site-packages/torch/lib:$LD_LIBRARY_PATH"
+export CUDNN_PATH="$CONDA_PREFIX/lib"
+export CUDA_HOME="$CONDA_PREFIX"
 EOF
-    chmod +x $CONDA_PATH/etc/conda/activate.d/edit_environment_variable.sh
+    chmod +x "$env_path/etc/conda/activate.d/env_setup.sh"
     
-    mkdir -p $CONDA_PATH/etc/conda/deactivate.d
-    cat > $CONDA_PATH/etc/conda/deactivate.d/rollback_environment_variable.sh << EOF
-export LD_LIBRARY_PATH=\$ORIGINAL_LD_LIBRARY_PATH
-export LD_CUDNN_PATH=\$ORIGINAL_CUDNN_PATH
-export LD_CUDA_HOME=\$ORIGINAL_CUDA_HOME
-export CONDA_PATH=\$ORIGINAL_CONDA_PATH
+    # deactivate.dスクリプトで環境変数を復元
+    mkdir -p "$env_path/etc/conda/deactivate.d"
+    cat > "$env_path/etc/conda/deactivate.d/env_cleanup.sh" << 'EOF'
+#!/bin/bash
+# 環境変数を復元
+export LD_LIBRARY_PATH="$ORIGINAL_LD_LIBRARY_PATH"
+export CUDNN_PATH="$ORIGINAL_CUDNN_PATH"
+export CUDA_HOME="$ORIGINAL_CUDA_HOME"
+
+# バックアップ変数をクリア
 unset ORIGINAL_LD_LIBRARY_PATH
 unset ORIGINAL_CUDNN_PATH
 unset ORIGINAL_CUDA_HOME
-unset ORIGINAL_CONDA_PATH
 EOF
-    chmod +x $CONDA_PATH/etc/conda/deactivate.d/rollback_environment_variable.sh
+    chmod +x "$env_path/etc/conda/deactivate.d/env_cleanup.sh"
     
+    # conda初期化と設定
     source ~/.bashrc
     source /home/appli/miniconda3/24.7.1-py311/etc/profile.d/conda.sh
     
     conda init
     conda config --set auto_activate_base false
     
+    # 既存の環境をdeactivate
     conda deactivate 2>/dev/null || true
     conda deactivate 2>/dev/null || true
     
-    conda activate $CONDA_PATH || error_exit "Failed to activate conda environment"
+    # 新しい環境をactivate
+    conda activate "$env_path" || error_exit "Failed to activate conda environment"
     
+    log "Conda environment created and activated: $CONDA_PREFIX"
     log "Step 0-2 completed successfully"
 }
 
 step_0_3_package_installation() {
+    check_step_prerequisites "0_3"
     log "Step 0-3: パッケージ等のインストール"
     
     conda install cuda-toolkit=12.4.1 -c nvidia/label/cuda-12.4.1 -y || error_exit "Failed to install CUDA toolkit"
@@ -107,6 +178,7 @@ step_0_3_package_installation() {
 }
 
 step_0_4_clone_repository() {
+    check_step_prerequisites "0_4"
     log "Step 0-4: このgitレポジトリのクローン"
     
     cd ~/
@@ -125,26 +197,41 @@ step_0_4_clone_repository() {
 }
 
 step_0_5_environment_check() {
+    check_step_prerequisites "0_5"
     log "Step 0-5: conda環境プリント確認"
     
-    conda deactivate 2>/dev/null || true
-    conda activate $CONDA_PATH || error_exit "Failed to activate conda environment"
-    
+    # 環境情報の表示
     conda env list
-    echo "--- CONDA_PREFIX: ---"
+    echo "=== 現在の環境情報 ==="
     echo "CONDA_PREFIX: $CONDA_PREFIX"
-    echo "--- pip, python パスはCONDA_PREFIXで始まる ---"
-    echo "pip: $(which pip)"
+    echo "CONDA_DEFAULT_ENV: $CONDA_DEFAULT_ENV"
+    echo "=== Python/pip パス ==="
     echo "python: $(which python)"
-    echo "--- 環境変数 ---"
-    printenv | grep CUDA || true
-    printenv | grep CUDNN || true
-    printenv | grep LD_LIB || true
+    echo "pip: $(which pip)"
+    echo "=== CUDA/CUDNN 環境変数 ==="
+    echo "CUDA_HOME: $CUDA_HOME"
+    echo "CUDNN_PATH: $CUDNN_PATH"
+    echo "=== ライブラリパス ==="
+    echo "LD_LIBRARY_PATH: $LD_LIBRARY_PATH"
+    
+    # 環境の整合性チェック
+    if [[ "$(which python)" == "$CONDA_PREFIX"* ]]; then
+        log "✅ Python path is correctly using conda environment"
+    else
+        log "⚠️  Warning: Python path may not be using conda environment"
+    fi
+    
+    if [[ "$(which pip)" == "$CONDA_PREFIX"* ]]; then
+        log "✅ Pip path is correctly using conda environment"
+    else
+        log "⚠️  Warning: Pip path may not be using conda environment"
+    fi
     
     log "Step 0-5 completed successfully"
 }
 
 step_0_6_verl_installation() {
+    check_step_prerequisites "0_6"
     log "Step 0-6: Verlのインストール"
     
     cd ~/
@@ -173,6 +260,7 @@ step_0_6_verl_installation() {
 }
 
 step_0_7_apex_installation() {
+    check_step_prerequisites "0_7"
     log "Step 0-7: apexのインストール"
     
     cd ~/deps
@@ -200,37 +288,119 @@ step_0_7_apex_installation() {
 }
 
 step_0_8_flash_attention_installation() {
+    check_step_prerequisites "0_8"
     log "Step 0-8: Flash Attention 2のインストール"
     
+    # メモリ制限を解除
     ulimit -v unlimited
-    MAX_JOBS=64 pip install flash-attn==2.6.3 --no-build-isolation || error_exit "Failed to install Flash Attention 2"
+    
+    log "Attempting to install Flash Attention 2.6.3..."
+    log "Note: This step may take 30-60 minutes due to compilation"
+    log "Recommendation: Run this step in tmux/screen to prevent SSH disconnection"
+    
+    # プリビルド版が利用可能かチェック
+    log "Checking for pre-built wheels..."
+    pip index versions flash-attn 2>/dev/null | head -10 || true
+    
+    # インストール実行（タイムアウト対策付き）
+    log "Starting Flash Attention 2 installation (this may take a while)..."
+    
+    # 環境情報をログ出力
+    log "CUDA version: $(nvcc --version 2>/dev/null | grep 'release' || echo 'nvcc not found')"
+    log "Python version: $(python --version)"
+    log "PyTorch CUDA: $(python -c 'import torch; print(torch.version.cuda)' 2>/dev/null || echo 'unknown')"
+    
+    # インストール実行（進捗表示付き）
+    if MAX_JOBS=32 pip install flash-attn==2.6.3 --no-build-isolation --verbose; then
+        log "✅ Flash Attention 2 installation completed successfully"
+    else
+        log "❌ Flash Attention 2 installation failed"
+        log "Troubleshooting suggestions:"
+        log "1. Check available disk space: df -h"
+        log "2. Check memory usage: free -h"
+        log "3. Try with fewer jobs: MAX_JOBS=16"
+        log "4. Consider using tmux/screen for long-running builds"
+        log "5. Check CUDA compatibility with PyTorch version"
+        error_exit "Failed to install Flash Attention 2"
+    fi
+    
+    # インストール確認
+    log "Verifying Flash Attention 2 installation..."
+    python -c "import flash_attn; print(f'Flash Attention version: {flash_attn.__version__}')" || {
+        log "❌ Flash Attention 2 import test failed"
+        error_exit "Flash Attention 2 installation verification failed"
+    }
     
     log "Step 0-8 completed successfully"
 }
 
 step_0_9_transformer_engine_installation() {
+    check_step_prerequisites "0_9"
     log "Step 0-9: TransformerEngineのインストール"
     
-    cd ~/deps
+    cd ~/deps || error_exit "Failed to change to ~/deps directory"
     
+    # TransformerEngineリポジトリの取得/更新
     if [ ! -d "TransformerEngine" ]; then
+        log "Cloning TransformerEngine repository..."
         git clone https://github.com/NVIDIA/TransformerEngine || error_exit "Failed to clone TransformerEngine repository"
     else
         log "TransformerEngine repository already exists, updating..."
-        cd TransformerEngine && git pull && cd ..
+        cd TransformerEngine
+        git fetch --all || log "Warning: Failed to fetch latest changes"
+        git pull || log "Warning: Failed to pull latest changes"
+        cd ..
     fi
     
-    cd TransformerEngine
-    git submodule update --init --recursive
-    git checkout release_v2.4
-    NMAX_JOBS=64 VTE_FRAMEWORK=pytorch pip install --no-cache-dir . || error_exit "Failed to install TransformerEngine"
+    cd TransformerEngine || error_exit "Failed to enter TransformerEngine directory"
     
-    cd ../
+    # サブモジュールの更新とブランチ切り替え
+    log "Updating submodules..."
+    git submodule update --init --recursive || error_exit "Failed to update submodules"
+    
+    log "Checking out release_v2.4..."
+    git checkout release_v2.4 || error_exit "Failed to checkout release_v2.4"
+    
+    # 環境情報の表示
+    log "Environment information for TransformerEngine build:"
+    log "CUDA version: $(nvcc --version 2>/dev/null | grep 'release' || echo 'nvcc not found')"
+    log "Python version: $(python --version)"
+    log "PyTorch version: $(python -c 'import torch; print(torch.__version__)' 2>/dev/null || echo 'unknown')"
+    log "CUDA_HOME: $CUDA_HOME"
+    log "CUDNN_PATH: $CUDNN_PATH"
+    
+    # インストール実行
+    log "Starting TransformerEngine installation (this may take 15-30 minutes)..."
+    log "Note: Consider using tmux/screen for long-running builds"
+    
+    # オリジナルのビルド設定を使用
+    if NMAX_JOBS=64 VTE_FRAMEWORK=pytorch pip install --no-cache-dir .; then
+        log "✅ TransformerEngine installation completed successfully"
+    else
+        log "❌ TransformerEngine installation failed"
+        log "Troubleshooting suggestions:"
+        log "1. Check CUDA toolkit installation: nvcc --version"
+        log "2. Check available disk space: df -h"
+        log "3. Check memory usage: free -h"
+        log "4. Verify PyTorch CUDA compatibility"
+        log "5. Try with fewer jobs: MAX_JOBS=16"
+        error_exit "Failed to install TransformerEngine"
+    fi
+    
+    # インストール確認
+    log "Verifying TransformerEngine installation..."
+    python -c "import transformer_engine; print(f'TransformerEngine version: {transformer_engine.__version__}')" || {
+        log "❌ TransformerEngine import test failed"
+        error_exit "TransformerEngine installation verification failed"
+    }
+    
+    cd ../ || log "Warning: Failed to return to parent directory"
     
     log "Step 0-9 completed successfully"
 }
 
 step_0_10_installation_check() {
+    check_step_prerequisites "0_10"
     log "Step 0-10: インストール状況のチェック"
     
     python - <<'PY'
@@ -305,20 +475,35 @@ run_all_steps() {
 }
 
 show_usage() {
+    echo "=== LLM Bridge Production Environment Setup Script ==="
     echo "Usage: $0 [option]"
+    echo ""
     echo "Options:"
-    echo "  all                    Run all installation steps"
-    echo "  step_0_1              Run Step 0-1: Preparation"
+    echo "  all                    Run all installation steps (recommended for first-time setup)"
+    echo "  step_0_1              Run Step 0-1: Preparation (module loading, conda setup)"
     echo "  step_0_2              Run Step 0-2: Conda environment creation"
-    echo "  step_0_3              Run Step 0-3: Package installation"
+    echo "  step_0_3              Run Step 0-3: Package installation (CUDA, cuDNN, GCC, git)"
     echo "  step_0_4              Run Step 0-4: Repository clone"
-    echo "  step_0_5              Run Step 0-5: Environment check"
-    echo "  step_0_6              Run Step 0-6: Verl installation"
-    echo "  step_0_7              Run Step 0-7: Apex installation"
-    echo "  step_0_8              Run Step 0-8: Flash Attention installation"
-    echo "  step_0_9              Run Step 0-9: TransformerEngine installation"
-    echo "  step_0_10             Run Step 0-10: Installation check"
+    echo "  step_0_5              Run Step 0-5: Environment check and verification"
+    echo "  step_0_6              Run Step 0-6: Verl installation (vLLM, Ray)"
+    echo "  step_0_7              Run Step 0-7: NVIDIA Apex installation"
+    echo "  step_0_8              Run Step 0-8: Flash Attention 2 installation (⚠️  Long build time)"
+    echo "  step_0_9              Run Step 0-9: TransformerEngine installation (⚠️  Long build time)"
+    echo "  step_0_10             Run Step 0-10: Final installation verification"
     echo "  help                  Show this help message"
+    echo ""
+    echo "⚠️  Important Notes:"
+    echo "  • Steps 0-8 and 0-9 may take 30-60 minutes each due to compilation"
+    echo "  • For long-running steps, use tmux/screen to prevent SSH disconnection:"
+    echo "    tmux new-session -d -s install './install_conda_env.sh step_0_8'"
+    echo "    tmux attach-session -t install"
+    echo "  • Each step assumes previous steps have been completed successfully"
+    echo "  • Individual steps will check prerequisites and fail if not met"
+    echo ""
+    echo "📋 Typical Usage:"
+    echo "  First-time setup:     $0 all"
+    echo "  Resume from step 8:   $0 step_0_8"
+    echo "  Verify installation:  $0 step_0_10"
 }
 
 case "${1:-all}" in

@@ -19,16 +19,11 @@ conda activate $CONDA_PATH
 
 # distributed settings
 MASTER_ADDR=${1}
-echo "MASTER_ADDR=${MASTER_ADDR}"
 MASTER_PORT=${2}
-echo "MASTER_PORT=${MASTER_PORT}"
 NODE_RANK=${3}
-echo "Node rank: "$NODE_RANK
 NNODES=${4}
-echo "Node num: "$NNODES
 GPUS_PER_NODE=${5}
-echo "Node num: "$GPUS_PER_NODE
-
+echo "MASTER_ADDR=${MASTER_ADDR} PORT=${MASTER_PORT} RANK=${NODE_RANK} NODES=${NNODES} GPUS=${GPUS_PER_NODE}"
 
 export NCCL_SOCKET_IFNAME=enp25s0np0
 export NVTE_FUSED_ATTN=0
