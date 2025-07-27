@@ -23,6 +23,15 @@ llm_bridge_prod/
 │       ├── upload_tokenizer_and_finetuned_model_to_huggingface_hub.py
 │       ├── mutinode_sft/       # マルチノードSFT用
 │       └── mutinode_ppo/       # マルチノードPPO用
+├── eval_hle/                    # Humanity's Last Exam評価
+│   ├── predict.py              # モデル予測スクリプト
+│   ├── judge.py                # 自動評価スクリプト
+│   └── conf/                   # 設定ファイル
+├── eval_dna/                    # Do Not Answer評価
+│   └── llm-compe-eval/         # 安全性評価スクリプト
+└── aaa/                        # インストール用補助スクリプト
+    ├── install.sh              # 依存関係一括インストール
+    └── run_verl_single_node.sh # シングルノード実行スクリプト
 ```
 
 ## 学習の流れ
@@ -30,12 +39,39 @@ llm_bridge_prod/
 ### Step 0: 環境構築
 Conda環境の作成と必要なライブラリのインストール
 
+```bash
+# Anacondaのインストール（未インストールの場合）
+wget https://repo.anaconda.com/archive/Anaconda3-2024.06-1-Linux-x86_64.sh
+bash Anaconda3-2024.06-1-Linux-x86_64.sh
+
+# Conda環境の作成
+conda create -n llmbench python=3.11
+conda activate llmbench
+
+# 基本ライブラリのインストール
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+pip install transformers datasets wandb tensorboard
+
+# Verlのインストール（競技用フレームワーク）
+pip install verl
+```
+
 ### Step 1: シングルノード学習
 - **SFT (Supervised Fine-Tuning)**: 教師ありファインチューニング
+  - 実行コマンド: `bash scripts/mutinode_sft/sft_llama.sh`
+  - 学習時間の目安: 1-2時間（モデルサイズとデータ量による）
+  - GPU使用量: 8 x Nvidia H100 (80GB)
+
 - **PPO (Proximal Policy Optimization)**: 強化学習
+  - 実行コマンド: `bash scripts/mutinode_ppo/launch_training.py`
+  - 学習時間の目安: 2-4時間
+  - 前提条件: SFTで学習したモデルが必要
 
 ### Step 2: マルチノード学習
 複数のGPUノードを使った分散学習
+- 実行コマンド: `sbatch scripts/mutinode_sft/_sft_llama.sh`
+- ノード数: 2ノード（16GPU）
+- 通信方式: NCCL（NVIDIA GPU間通信）
 
 ## 主要な依存関係とその目的
 
@@ -214,15 +250,42 @@ Conda環境の作成と必要なライブラリのインストール
 
 #### GPU メモリ不足
 - **原因**: バッチサイズが大きすぎる
-- **解決策**: `micro_batch_size_per_gpu`を小さくする
+- **解決策**: 
+  ```bash
+  # scripts/mutinode_sft/sft_llama.sh を編集
+  micro_batch_size_per_gpu=1  # 元の値から減らす
+  gradient_accumulation_steps=16  # 代わりにこちらを増やす
+  ```
 
 #### 分散学習の通信エラー
 - **原因**: ネットワーク設定の問題
-- **解決策**: `NCCL_SOCKET_IFNAME`を正しく設定
+- **解決策**: 
+  ```bash
+  # 環境変数を設定
+  export NCCL_SOCKET_IFNAME=ib0  # InfiniBandの場合
+  export NCCL_DEBUG=INFO  # デバッグ情報を表示
+  ```
 
 #### 環境変数の設定ミス
 - **原因**: モジュールの読み込み順序
-- **解決策**: `module reset`してから正しい順序で読み込み
+- **解決策**: 
+  ```bash
+  module reset
+  module load cuda/12.6 miniconda/24.7.1-py312 cudnn/9.6.0 nccl/2.24.3
+  ```
+
+#### Verlのインストールエラー
+- **原因**: 依存関係の競合
+- **解決策**:
+  ```bash
+  # クリーンインストール
+  conda deactivate
+  conda env remove -n llmbench
+  conda create -n llmbench python=3.11
+  conda activate llmbench
+  # aaa/install.sh を使用
+  bash aaa/install.sh
+  ```
 
 ### ベストプラクティス
 
@@ -237,6 +300,66 @@ Conda環境の作成と必要なライブラリのインストール
 - [Hugging Face トークン発行](https://huggingface.co/settings/tokens)
 - [Weights & Biases](https://wandb.ai/)
 
+## 初心者向けクイックスタートガイド
+
+### 1. 最小限の環境でテストする方法
+
+```bash
+# 1. プロジェクトのクローン
+git clone https://github.com/Ohtani-y/llm_bridge_prod.git
+cd llm_bridge_prod
+
+# 2. Conda環境のセットアップ
+conda create -n llmbench python=3.11
+conda activate llmbench
+
+# 3. 依存関係のインストール（簡易版）
+bash aaa/install.sh
+
+# 4. 小さいモデルでテスト実行
+cd train
+# sft_llama.sh を編集して小さいモデルに変更
+# model_id="meta-llama/Llama-3.2-1B-Instruct" → model_id="microsoft/phi-2"
+bash scripts/mutinode_sft/sft_llama.sh
+```
+
+### 2. ローカル環境（RTX 4090など）での実行
+
+単一GPUまたは少数のGPUで実行する場合：
+
+```bash
+# GPUメモリに合わせて設定を調整
+export CUDA_VISIBLE_DEVICES=0  # 使用するGPUを指定
+
+# バッチサイズを小さく設定
+micro_batch_size_per_gpu=1
+gradient_accumulation_steps=32
+```
+
+### 3. 競技向けチェックリスト
+
+- [ ] Hugging Face アカウントの作成とトークン発行
+- [ ] Weights & Biases アカウントの作成
+- [ ] OpenAI API キーの取得（評価用）
+- [ ] SLURM環境へのアクセス確認
+- [ ] GPUリソースの割り当て確認
+- [ ] ベースモデルの選定（Llama-3.2-1B-Instructなど）
+- [ ] 学習データの準備（GSM8Kなど）
+- [ ] SFT実行と結果確認
+- [ ] PPO実行と結果確認
+- [ ] モデルのHugging Face Hubへのアップロード
+- [ ] 評価スクリプトの実行（HLE、DNA）
+
 ## まとめ
 
-このプロジェクトは、最新のLLM学習技術を統合した包括的なフレームワークです。各依存関係は特定の目的を持ち、全体として効率的で高性能なLLM学習環境を構築しています。初心者の方は、まずシングルノードでの学習から始めて、徐々に高度な機能を習得することをお勧めします。
+このプロジェクトは、最新のLLM学習技術を統合した包括的なフレームワークです。各依存関係は特定の目的を持ち、全体として効率的で高性能なLLM学習環境を構築しています。
+
+### 学習の推奨ステップ
+
+1. **理解フェーズ**: まずドキュメントを読み、全体像を把握
+2. **環境構築フェーズ**: ローカル環境で小さいモデルでテスト
+3. **実験フェーズ**: シングルノードで本格的な学習を試行
+4. **最適化フェーズ**: パラメータ調整とマルチノード学習
+5. **評価フェーズ**: HLEとDNAで性能評価
+
+初心者の方は、まずシングルノードでの学習から始めて、徐々に高度な機能を習得することをお勧めします。
